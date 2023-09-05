@@ -31,16 +31,28 @@ variable "https_port" {
   default     = 443
 }
 
-variable "replicated_port" {
-  description = "Server port for Replicated dashboard."
-  type        = number
-  default     = 8800
-}
+# variable "replicated_port" {
+#   description = "Server port for Replicated dashboard."
+#   type        = number
+#   default     = 8800
+# }
 
 variable "postgresql_port" {
   description = "PostgreSQL database port."
   type        = number
   default     = 5432
+}
+
+variable "redis_port" {
+  description = "Redis database port."
+  type        = number
+  default     = 6379
+}
+
+variable "vaultcluster_port" {
+  description = "Vault cluster communication port."
+  type        = number
+  default     = 8201
 }
 
 variable "instance_type" {
