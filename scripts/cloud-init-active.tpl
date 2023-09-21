@@ -33,7 +33,7 @@ write_files:
     content: |
       {
         "enable_active_active" : {
-            "value": "0"
+            "value": "1"
         },
         "hostname": {
             "value": "${fqdn}"

@@ -31,12 +31,6 @@ variable "https_port" {
   default     = 443
 }
 
-# variable "replicated_port" {
-#   description = "Server port for Replicated dashboard."
-#   type        = number
-#   default     = 8800
-# }
-
 variable "postgresql_port" {
   description = "PostgreSQL database port."
   type        = number
@@ -109,4 +103,28 @@ variable "admin_password" {
 variable "release_sequence" {
   description = "Release number of the TFE version you wish to install."
   type        = number
+}
+
+variable "min_size" {
+  description = "The minimum number of instances in the auto scaling group"
+  type        = number
+  default     = 1
+}
+
+variable "max_size" {
+  description = "The maximum number of instances in the auto scaling group"
+  type        = number
+  default     = 1
+}
+
+variable "desired_capacity" {
+  description = "The desired number of instances in the auto scaling group"
+  type        = number
+  default     = 1
+}
+
+variable "active_active" {
+  description = "If installation type is active-active"
+  type        = bool
+  default     = true
 }

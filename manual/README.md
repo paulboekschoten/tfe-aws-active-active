@@ -354,3 +354,104 @@ Select your Load Balancer.
 ![](media/2023-09-01-16-27-57.png)  
 Click `Save`
 
+
+# Switch to active-active
+https://developer.hashicorp.com/terraform/enterprise/install/automated/active-active
+
+Make sure the following ports are enabled:  
+- 6379 (for Redis)  
+- 8201 (for Vault High Availability mode)  
+
+Port 8800 can be closed, as the Replicated Admin UI will be disabled.  
+This is done in the previous steps.  
+
+For the following steps you need to edit the launch template.  
+Go to Launch Templates and select your luanch template.  
+Under Actions click on `Modify template (Create new version`.  )
+![](media/2023-09-06-13-34-28.png)  
+
+Provide a template version description.  
+![](media/2023-09-06-13-35-22.png)  
+
+Scroll down to `Advanced details` and expand.  
+Scroll down to `User data`.  
+
+- Make sure the release sequence is pinned.
+Find the line for the `install.sh` and check `release-sequence` is set.  
+```
+bash /tmp/install.sh release-sequence=725 no-proxy private-address=$private_ip
+```
+
+- Set active-active mode
+Find the line with `  - path: "/etc/settings.json"`.  
+Under `content`  add the following:  
+```
+"enable_active_active" : {
+    "value": "1"
+  },
+```
+
+- Configure external Redis
+Find the line with `  - path: "/etc/settings.json"`.  
+Under `content`  add the following:  
+```
+    "redis_host" : {
+      "value": "tfe-active-online-redis.q1a0ms.0001.euw3.cache.amazonaws.com:6379"
+    },
+    "redis_port" : {
+      "value": "6379"
+    },
+    "redis_use_password_auth" : {
+      "value": "0"
+    },
+    "redis_use_tls" : {
+      "value": "0"
+    },
+```
+Replace the redis_host with your actual value of the Redis endpoint. 
+Can be found in the node of your redis cluster.  
+![](media/2023-09-06-13-46-33.png)  
+
+- Encryption password
+Make sure you have set an encryption password, this needs to be the same for all TFE nodes.  
+Find the line with `  - path: "/etc/settings.json"`.  
+Under `content` following should exist: 
+```
+"enc_password": {
+            "value": "Password#1"
+        },
+```
+
+Click `Create template version`.  
+
+Go back to you auto scaling group and check the new version is being used.  
+![](media/2023-09-06-13-50-41.png)  
+Under Launch template description, you should see the description you set for the new Luanch template.  
+
+For the changes to take effect, a new instance will need to be provisioned.  
+Terminate the existing instance by scaling down to zero. Once terminated, you can scale back up to one instance using your revised configuration.
+
+![](media/2023-09-06-13-52-50.png)  
+Click Edit and set all values to 0.  
+
+Check your EC2 instances to see that it gets teminated.  
+
+Once terminated, set the scaling values back to 1. Not higher!
+
+When running
+
+- Disable the UI 
+Find the line for the `install.sh` and `disable-replicated-ui`.  
+```
+bash /tmp/install.sh disable-replicated-ui release-sequence=${release_sequence} no-proxy private-address=$private_ip public-address=$public_ip
+```
+
+Now you can scale up to two nodes.  
+
+Note:  
+When installing TFE for the first time, this needs to be done with active-active off:  
+```
+"enable_active_active" : {
+    "value": "0"
+  },
+```
