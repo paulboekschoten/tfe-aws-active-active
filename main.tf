@@ -658,4 +658,10 @@ resource "aws_autoscaling_group" "tfe" {
     version = "$Latest"
   }
 
+  lifecycle {
+    create_before_destroy = false
+    # force recreate of nodes when template changes
+    replace_triggered_by = [aws_launch_template.tfe_active, aws_launch_template.tfe]
+  }
+
 }
