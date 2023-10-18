@@ -15,6 +15,13 @@ terraform {
 
 provider "aws" {
   region = var.region
+
+  default_tags {
+    tags = {
+      Name    = var.environment_name
+      OwnedBy = var.owned_by
+    }
+  }
 }
 
 provider "acme" {
@@ -27,7 +34,6 @@ resource "aws_vpc" "tfe" {
 
   tags = {
     Name = "${var.environment_name}-vpc"
-    OwnedBy = var.owned_by
   }
 }
 
@@ -35,10 +41,21 @@ resource "aws_vpc" "tfe" {
 resource "aws_subnet" "tfe_public" {
   vpc_id     = aws_vpc.tfe.id
   cidr_block = cidrsubnet(var.vpc_cidr, 8, 0)
+  availability_zone = "${var.region}c"
 
   tags = {
     Name = "${var.environment_name}-subnet-public"
-    OwnedBy = var.owned_by
+  }
+}
+
+# public subnet
+resource "aws_subnet" "tfe_public2" {
+  vpc_id     = aws_vpc.tfe.id
+  cidr_block = cidrsubnet(var.vpc_cidr, 8, 3)
+  availability_zone = "${var.region}a"
+
+  tags = {
+    Name = "${var.environment_name}-subnet-public2"
   }
 }
 
@@ -87,8 +104,50 @@ resource "aws_default_route_table" "tfe" {
 
   tags = {
     Name = "${var.environment_name}-rtb"
-    OwnedBy = var.owned_by
   }
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.tfe_public.id
+  route_table_id = aws_default_route_table.tfe.id
+}
+
+resource "aws_route_table_association" "public2" {
+  subnet_id      = aws_subnet.tfe_public2.id
+  route_table_id = aws_default_route_table.tfe.id
+}
+
+# add nat gateway
+resource "aws_nat_gateway" "tfe_nat" {
+  allocation_id = aws_eip.eip_tfe.id
+  subnet_id     = aws_subnet.tfe_public.id
+
+  # To ensure proper ordering, it is recommended to add an explicit dependency
+  # on the Internet Gateway for the VPC.
+  depends_on = [aws_internet_gateway.tfe_igw]
+}
+
+resource "aws_route_table" "tfe_private" {
+  vpc_id = aws_vpc.tfe.id
+
+  route {
+    cidr_block = local.all_ips
+    nat_gateway_id = aws_nat_gateway.tfe_nat.id
+  }
+
+  tags = {
+    Name = "${var.environment_name}-rtb-private"
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.tfe_private.id
+  route_table_id = aws_route_table.tfe_private.id
+}
+
+resource "aws_route_table_association" "private2" {
+  subnet_id      = aws_subnet.tfe_private2.id
+  route_table_id = aws_route_table.tfe_private.id
 }
 
 # key pair
@@ -144,17 +203,6 @@ resource "aws_security_group_rule" "allow_https_inbound" {
   cidr_blocks = [local.all_ips]
 }
 
-# sg rule https inbound
-resource "aws_security_group_rule" "allow_replicated_inbound" {
-  type              = "ingress"
-  security_group_id = aws_security_group.tfe_sg.id
-
-  from_port   = var.replicated_port
-  to_port     = var.replicated_port
-  protocol    = local.tcp_protocol
-  cidr_blocks = [local.all_ips]
-}
-
 # sg rule postgresql local vpc inbound
 resource "aws_security_group_rule" "allow_postgresql_inbound_vpc" {
   type              = "ingress"
@@ -162,6 +210,28 @@ resource "aws_security_group_rule" "allow_postgresql_inbound_vpc" {
 
   from_port   = var.postgresql_port
   to_port     = var.postgresql_port
+  protocol    = local.tcp_protocol
+  cidr_blocks = [aws_vpc.tfe.cidr_block]
+}
+
+# sg rule postgresql local vpc inbound
+resource "aws_security_group_rule" "allow_redis_inbound_vpc" {
+  type              = "ingress"
+  security_group_id = aws_security_group.tfe_sg.id
+
+  from_port   = var.redis_port
+  to_port     = var.redis_port
+  protocol    = local.tcp_protocol
+  cidr_blocks = [aws_vpc.tfe.cidr_block]
+}
+
+# sg rule postgresql local vpc inbound
+resource "aws_security_group_rule" "allow_vaultcluster_inbound_vpc" {
+  type              = "ingress"
+  security_group_id = aws_security_group.tfe_sg.id
+
+  from_port   = var.vaultcluster_port
+  to_port     = var.vaultcluster_port
   protocol    = local.tcp_protocol
   cidr_blocks = [aws_vpc.tfe.cidr_block]
 }
@@ -194,50 +264,6 @@ data "aws_ami" "ubuntu" {
   owners = ["099720109477"] # Canonical
 }
 
-# EC2 instance
-resource "aws_instance" "tfe" {
-  ami                    = data.aws_ami.ubuntu.image_id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.tfe.key_name
-  vpc_security_group_ids = [aws_security_group.tfe_sg.id]
-  subnet_id              = aws_subnet.tfe_public.id
-  iam_instance_profile   = aws_iam_instance_profile.tfe_profile.name
-
-  user_data = templatefile("${path.module}/scripts/cloud-init.tpl", {
-    region              = var.region
-    environment_name    = var.environment_name
-    enc_password        = var.tfe_encryption_password,
-    replicated_password = var.replicated_password,
-    admin_username      = var.admin_username,
-    admin_email         = var.admin_email,
-    admin_password      = var.admin_password
-    pg_password         = var.postgresql_password
-    fqdn                = local.fqdn
-    s3tfe               = aws_s3_bucket.tfe.bucket
-    s3files             = aws_s3_bucket.tfe_files.bucket
-    pg_netloc           = aws_db_instance.tfe.endpoint
-    release_sequence    = var.release_sequence
-  })
-
-  root_block_device {
-    volume_size = 100
-  }
-
-  tags = {
-    Name = "${var.environment_name}-tfe"
-    OwnedBy = var.owned_by
-  }
-
-  depends_on = [
-    aws_s3_bucket.tfe,
-    aws_s3_bucket.tfe_files,
-    aws_s3_object.replicated_license,
-    aws_s3_object.certificate,
-    aws_s3_object.private_key,
-    aws_db_instance.tfe
-  ]
-}
-
 # create public ip
 resource "aws_eip" "eip_tfe" {
   domain = "vpc"
@@ -245,12 +271,6 @@ resource "aws_eip" "eip_tfe" {
     Name = "${var.environment_name}-eip"
     OwnedBy = var.owned_by
   }
-}
-
-# associate public ip with instance
-resource "aws_eip_association" "eip_assoc" {
-  instance_id   = aws_instance.tfe.id
-  allocation_id = aws_eip.eip_tfe.id
 }
 
 ## route53 fqdn
@@ -265,8 +285,11 @@ resource "aws_route53_record" "www" {
   zone_id = data.aws_route53_zone.selected.zone_id
   name    = local.fqdn
   type    = "A"
-  ttl     = "300"
-  records = [aws_eip.eip_tfe.public_ip]
+  alias {
+    name = aws_lb.tfe.dns_name
+    zone_id = aws_lb.tfe.zone_id
+    evaluate_target_health = true
+  }
 }
 
 ## certficate let's encrypt
@@ -441,7 +464,7 @@ resource "aws_db_instance" "tfe" {
   allocated_storage   = 50
   db_name             = "tfe"
   engine              = "postgres"
-  engine_version      = "14.5"
+  engine_version      = "14.7"
   instance_class      = "db.m5.large"
   username            = "postgres"
   password            = var.postgresql_password
@@ -466,4 +489,179 @@ resource "aws_db_subnet_group" "tfe" {
     Name = "${var.environment_name}-subnetgroup"
     OwnedBy = var.owned_by
   }
+}
+
+# Redis
+resource "aws_elasticache_subnet_group" "redis" {
+  name       = var.environment_name
+  subnet_ids = [aws_subnet.tfe_private.id, aws_subnet.tfe_private2.id]
+
+  tags = {
+    Name = var.environment_name
+  }
+}
+
+resource "aws_elasticache_cluster" "redis" {
+  cluster_id           = "${var.environment_name}-redis"
+  engine               = "redis"
+  node_type            = "cache.t3.small"
+  num_cache_nodes      = 1
+  parameter_group_name = "default.redis7"
+  engine_version       = "7.0"
+  port                 = var.redis_port
+  security_group_ids   = [aws_security_group.tfe_sg.id]
+  subnet_group_name    = aws_elasticache_subnet_group.redis.name
+
+  tags = {
+    Name = "${var.environment_name}-redis"
+  }
+}
+
+# loadbalancer
+resource "aws_lb_target_group" "https443" {
+  name     = "${var.environment_name}-443"
+  port     = var.https_port
+  protocol = "HTTPS"
+  vpc_id   = aws_vpc.tfe.id
+
+  health_check {
+    protocol            = "HTTPS"
+    path                = "/_health_check"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+  }
+}
+
+resource "aws_lb" "tfe" {
+  name               = var.environment_name
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.tfe_sg.id]
+  subnets            = [aws_subnet.tfe_public.id, aws_subnet.tfe_public2.id]
+}
+
+resource "aws_lb_listener" "https443" {
+  load_balancer_arn = aws_lb.tfe.arn
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate.cert.arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.https443.arn
+  }
+}
+
+resource "aws_launch_template" "tfe" {
+  name                 = "tfe-active-online"
+  image_id             = data.aws_ami.ubuntu.image_id
+  instance_type        = "m5.xlarge"
+  key_name             = "tfe-active-online-keypair"
+  
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.tfe_profile.arn
+  }
+
+  network_interfaces {
+    security_groups = [aws_security_group.tfe_sg.id]
+    subnet_id       = aws_subnet.tfe_private.id
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      delete_on_termination = "true"
+      encrypted             = "false"
+      iops                  = 1000
+      volume_size           = 100
+      volume_type           = "io1"
+    }
+  }
+
+  user_data = base64encode(templatefile("${path.module}/scripts/cloud-init.tpl", {
+    region              = var.region
+    environment_name    = var.environment_name
+    enc_password        = var.tfe_encryption_password,
+    replicated_password = var.replicated_password,
+    admin_username      = var.admin_username,
+    admin_email         = var.admin_email,
+    admin_password      = var.admin_password
+    pg_password         = var.postgresql_password
+    fqdn                = local.fqdn
+    s3tfe               = aws_s3_bucket.tfe.bucket
+    s3files             = aws_s3_bucket.tfe_files.bucket
+    pg_netloc           = aws_db_instance.tfe.endpoint
+    release_sequence    = var.release_sequence
+    redis_host          = aws_elasticache_cluster.redis.cache_nodes.0.address
+    redis_port          = aws_elasticache_cluster.redis.cache_nodes.0.port
+  }))
+}
+
+resource "aws_launch_template" "tfe_active" {
+  name                 = "tfe-active-online-active"
+  image_id             = data.aws_ami.ubuntu.image_id
+  instance_type        = "m5.xlarge"
+  key_name             = "tfe-active-online-keypair"
+  
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.tfe_profile.arn
+  }
+
+  network_interfaces {
+    security_groups = [aws_security_group.tfe_sg.id]
+    subnet_id       = aws_subnet.tfe_private.id
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      delete_on_termination = "true"
+      encrypted             = "false"
+      iops                  = 1000
+      volume_size           = 100
+      volume_type           = "io1"
+    }
+  }
+
+  user_data = base64encode(templatefile("${path.module}/scripts/cloud-init-active.tpl", {
+    region              = var.region
+    environment_name    = var.environment_name
+    enc_password        = var.tfe_encryption_password,
+    replicated_password = var.replicated_password,
+    admin_username      = var.admin_username,
+    admin_email         = var.admin_email,
+    admin_password      = var.admin_password
+    pg_password         = var.postgresql_password
+    fqdn                = local.fqdn
+    s3tfe               = aws_s3_bucket.tfe.bucket
+    s3files             = aws_s3_bucket.tfe_files.bucket
+    pg_netloc           = aws_db_instance.tfe.endpoint
+    release_sequence    = var.release_sequence
+    redis_host          = aws_elasticache_cluster.redis.cache_nodes.0.address
+    redis_port          = aws_elasticache_cluster.redis.cache_nodes.0.port
+  }))
+}
+
+resource "aws_autoscaling_group" "tfe" {
+  name                   = var.environment_name
+  min_size               = var.min_size
+  max_size               = var.max_size
+  desired_capacity       = var.desired_capacity
+  vpc_zone_identifier    = [aws_subnet.tfe_private.id, aws_subnet.tfe_private2.id]
+  target_group_arns      = [aws_lb_target_group.https443.arn]
+  force_delete           = true
+  force_delete_warm_pool = true
+  
+  launch_template {
+    id      = var.active_active ? aws_launch_template.tfe_active.id : aws_launch_template.tfe.id
+    version = "$Latest"
+  }
+
+  lifecycle {
+    create_before_destroy = false
+    # force recreate of nodes when template changes
+    replace_triggered_by = [aws_launch_template.tfe_active, aws_launch_template.tfe]
+  }
+
 }
